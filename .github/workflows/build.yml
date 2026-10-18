@@ -1,8 +1,6 @@
 name: Build APK
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,11 +10,121 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - run: gradle :app:assembleDebug --no-daemon
+      - name: Generate project
+        run: |
+          pip install pillow -q
+          cat > gen.py <<'PY'
+          import os, math
+          from PIL import Image
+          B = "app/src/main"
+          for d in [f"{B}/java/com/drova/widget", f"{B}/res/layout", f"{B}/res/xml", f"{B}/res/values", f"{B}/res/drawable-nodpi"]:
+              os.makedirs(d, exist_ok=True)
+          src = Image.open("21447.webp").convert("RGBA").resize((256, 256))
+          N = 24
+          for i in range(N):
+              a = 2 * math.pi * i / N
+              w = max(1, int(256 * max(0.08, abs(math.cos(a)))))
+              fr = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+              s = src.resize((w, 256))
+              fr.paste(s, ((256 - w) // 2, 0), s)
+              fr.save(f"{B}/res/drawable-nodpi/spin_{i:02d}.png")
+          def w(p, t):
+              open(p, "w", encoding="utf-8").write(t)
+          w("settings.gradle", 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n'
+            'dependencyResolutionManagement { repositories { google(); mavenCentral() } }\nrootProject.name = "DrovaWidget"\ninclude \':app\'\n')
+          w("build.gradle", "plugins { id 'com.android.application' version '8.5.2' apply false }\n")
+          w("app/build.gradle", """plugins { id 'com.android.application' }
+          android {
+              namespace 'com.drova.widget'
+              compileSdk 34
+              defaultConfig { applicationId "com.drova.widget"; minSdk 26; targetSdk 34; versionCode 1; versionName "1.0" }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          """)
+          w(f"{B}/AndroidManifest.xml", """<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Продам дрова" android:icon="@android:drawable/sym_def_app_icon">
+                  <receiver android:name=".SpinWidget" android:exported="true">
+                      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info" />
+                  </receiver>
+                  <service android:name=".SpinService" android:exported="false" />
+              </application>
+          </manifest>
+          """)
+          w(f"{B}/res/xml/widget_info.xml", """<?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp" android:minHeight="110dp"
+              android:targetCellWidth="2" android:targetCellHeight="1"
+              android:updatePeriodMillis="0" android:initialLayout="@layout/widget_layout"
+              android:resizeMode="horizontal|vertical" android:widgetCategory="home_screen" />
+          """)
+          w(f"{B}/res/layout/widget_layout.xml", """<?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:gravity="center"
+              android:background="#2ECC71" android:padding="8dp">
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="ПРОДАМ ДРОВА" android:textColor="#FFFFFF"
+                  android:textSize="18sp" android:textStyle="bold" />
+              <ImageView android:id="@+id/spin_image" android:layout_width="72dp"
+                  android:layout_height="72dp" android:layout_marginTop="4dp"
+                  android:scaleType="fitCenter" android:src="@drawable/spin_00" />
+          </LinearLayout>
+          """)
+          w(f"{B}/res/values/strings.xml", '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">Продам дрова</string>\n</resources>\n')
+          frames = ",\n        ".join(f"R.drawable.spin_{i:02d}" for i in range(N))
+          J = f"{B}/java/com/drova/widget"
+          w(f"{J}/SpinWidget.java", """package com.drova.widget;
+          import android.appwidget.AppWidgetProvider;
+          import android.appwidget.AppWidgetManager;
+          import android.content.Context;
+          import android.content.Intent;
+          public class SpinWidget extends AppWidgetProvider {
+              @Override public void onUpdate(Context c, AppWidgetManager m, int[] ids) { c.startService(new Intent(c, SpinService.class)); }
+              @Override public void onDisabled(Context c) { c.stopService(new Intent(c, SpinService.class)); }
+          }
+          """)
+          w(f"{J}/SpinService.java", """package com.drova.widget;
+          import android.app.Service;
+          import android.appwidget.AppWidgetManager;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.widget.RemoteViews;
+          public class SpinService extends Service {
+              private static final int[] FRAMES = {
+                  """ + frames + """
+              };
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private int idx = 0;
+              private final Runnable tick = new Runnable() {
+                  @Override public void run() {
+                      AppWidgetManager m = AppWidgetManager.getInstance(SpinService.this);
+                      int[] ids = m.getAppWidgetIds(new ComponentName(SpinService.this, SpinWidget.class));
+                      if (ids.length == 0) { stopSelf(); return; }
+                      RemoteViews v = new RemoteViews(getPackageName(), R.layout.widget_layout);
+                      v.setImageViewResource(R.id.spin_image, FRAMES[idx]);
+                      m.partiallyUpdateAppWidget(ids, v);
+                      idx = (idx + 1) % FRAMES.length;
+                      h.postDelayed(this, 250);
+                  }
+              };
+              @Override public int onStartCommand(Intent i, int f, int s) { h.removeCallbacks(tick); h.post(tick); return START_STICKY; }
+              @Override public void onDestroy() { h.removeCallbacks(tick); super.onDestroy(); }
+              @Override public IBinder onBind(Intent i) { return null; }
+          }
+          """)
+          print("project generated")
+          PY
+          python3 gen.py
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: DrovaWidget-APK
